@@ -32,15 +32,15 @@ def load_data():
 df = load_data()
 
 if df.empty:
-    st.error("❌ No se encontraron datos. Ejecuta la Parte 3.")
+    st.error("No se encontraron datos")
     st.stop()
 
 # --- 3. ENCABEZADO Y FILTROS (EN LA PÁGINA PRINCIPAL) ---
-st.title("📊 Monitor COVID-19: Panel de Control")
+st.title("Monitor COVID-19: Panel de Control")
 
 # Creamos un contenedor con borde para que parezca una barra de herramientas
 with st.container(border=True):
-    st.markdown("### 🛠️ Configuración de Filtros")
+    st.markdown("###Configuración de Filtros")
     
     # Dividimos el ancho en 3 columnas iguales para los "botones/filtros"
     c_filt1, c_filt2, c_filt3 = st.columns(3)
@@ -49,7 +49,7 @@ with st.container(border=True):
     with c_filt1:
         if 'Continent' in df.columns:
             todos_continentes = sorted(df['Continent'].astype(str).unique().tolist())
-            sel_continent = st.multiselect("📍 1. Selecciona Continente(s)", todos_continentes, default=todos_continentes)
+            sel_continent = st.multiselect("1. Selecciona Continente(s)", todos_continentes, default=todos_continentes)
             df_cont = df[df['Continent'].isin(sel_continent)]
         else:
             df_cont = df
@@ -58,13 +58,13 @@ with st.container(border=True):
     # B. Filtro País (Columna 2)
     with c_filt2:
         paises_disponibles = ["Todos"] + sorted(df_cont['Country_Region'].unique().tolist())
-        sel_pais = st.selectbox("🌍 2. Selecciona País", paises_disponibles)
+        sel_pais = st.selectbox("2. Selecciona País", paises_disponibles)
 
     # C. Filtro Fechas (Columna 3)
     with c_filt3:
         min_date = df['Date'].min()
         max_date = df['Date'].max()
-        start_date, end_date = st.date_input("📅 3. Rango de Fechas", [min_date, max_date], min_value=min_date, max_value=max_date)
+        start_date, end_date = st.date_input("3. Rango de Fechas", [min_date, max_date], min_value=min_date, max_value=max_date)
 
 # --- 4. FILTRADO Y PROCESAMIENTO ---
 mask_base = (df_cont['Date'] >= pd.to_datetime(start_date)) & (df_cont['Date'] <= pd.to_datetime(end_date))
@@ -81,7 +81,7 @@ else:
     df_snapshot = df_filtrado[df_filtrado['Country_Region'] == sel_pais].iloc[[-1]]
 
 if df_temporal.empty:
-    st.warning("⚠️ No hay datos para mostrar con esta combinación de filtros.")
+    st.warning("No hay datos para mostrar con esta combinación de filtros.")
     st.stop()
 
 # --- 5. CÁLCULOS (KPIs y REBROTE) ---
@@ -96,12 +96,12 @@ df_temporal['Active_Change'] = df_temporal['Active'].diff()
 tendencia = df_temporal['Active_Change'].tail(5).sum()
 
 if tendencia > 0:
-    estado_rebrote = "⚠️ ALERTA: SUBIENDO"
+    estado_rebrote = "ALERTA: SUBIENDO"
     color_rebrote = "red" # Color para el semáforo
     icono = "🔥"
     desc_rebrote = "Los casos activos están aumentando en los últimos 5 días."
 else:
-    estado_rebrote = "✅ ESTABLE / BAJANDO"
+    estado_rebrote = "ESTABLE / BAJANDO"
     color_rebrote = "green"
     icono = "🛡️"
     desc_rebrote = "La curva de casos activos está controlada o descendiendo."
@@ -143,7 +143,7 @@ with c_status:
 
 with c_info:
     with st.container(border=True):
-        st.markdown("#### 🤖 Insights Automáticos")
+        st.markdown("####Insights Automáticos")
         col_i_a, col_i_b = st.columns(2)
         with col_i_a:
             st.info(f"**Tasa de Recuperación:** {recuperacion:.1f}% de los infectados ya están sanos.")
@@ -156,7 +156,7 @@ with c_info:
 
 # PESTAÑAS DE GRÁFICOS
 st.write("") # Espacio
-tab_evo, tab_map, tab_ana = st.tabs(["📈 Evolución y Tendencias", "🌍 Mapa Geográfico", "🔬 Análisis Avanzado"])
+tab_evo, tab_map, tab_ana = st.tabs(["Evolución y Tendencias", "Mapa Geográfico", "Análisis Avanzado"])
 
 with tab_evo:
     fig_line = px.line(
