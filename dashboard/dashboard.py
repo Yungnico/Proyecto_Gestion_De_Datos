@@ -215,6 +215,7 @@ def load_data():
         act = row['Active']
         rec = row['Recovered']
         
+        # Si Active viene 0 pero sí hay Confirmed, lo recalculamos
         if act == 0 and conf > 0:
             calc_act = conf - death - rec
             return max(0, calc_act)
@@ -227,7 +228,7 @@ def load_data():
     return df
 
 # ---------------------------------------------------------
-# DASHBOARD (tu código tal cual, ahora con Continent disponible)
+# DASHBOARD
 # ---------------------------------------------------------
 df = load_data()
 
@@ -261,21 +262,68 @@ if df_filt.empty:
     st.warning("No hay datos en el rango seleccionado.")
     st.stop()
 
+numeric_cols = ['Confirmed', 'Deaths', 'Recovered', 'Active']
+
 if sel_pais == "Todos":
-    df_temporal = df_filt.groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
-    df_map_sum = df_filt.groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
+    # Curvas globales: sumar por día (por si hay múltiples filas por país)
+    df_temporal = (
+        df_filt
+        .groupby('Date')[numeric_cols]
+        .sum()
+        .reset_index()
+    )
+
+    # Mapa / ranking: usar el ÚLTIMO dato disponible de cada país en el rango
+    df_last = (
+        df_filt
+        .sort_values('Date')
+        .groupby('Country_Region')
+        .tail(1)
+    )
+    df_map_sum = df_last[['Country_Region'] + numeric_cols]
+
     label_scope = "Global"
 else:
-    df_temporal = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Date').sum().reset_index()
-    df_map_sum = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
+    df_country = df_filt[df_filt['Country_Region'] == sel_pais]
+
+    # Curvas del país: sumar por día (por si tiene provincias)
+    df_temporal = (
+        df_country
+        .groupby('Date')[numeric_cols]
+        .sum()
+        .reset_index()
+    )
+
+    # Para el mapa / ranking en modo país (no se usa mapa, pero por consistencia)
+    df_last = (
+        df_country
+        .sort_values('Date')
+        .groupby('Country_Region')
+        .tail(1)
+    )
+    df_map_sum = df_last[['Country_Region'] + numeric_cols]
+
     label_scope = sel_pais
 
-total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum()
+# ---------------------------------------------------------
+# SWITCH: ÚLTIMO DATO vs ACUMULADO EN EL RANGO
+# ---------------------------------------------------------
+modo_totales = st.radio(
+    "Modo de resumen de totales",
+    ("Último dato del rango", "Acumulado en el rango"),
+    horizontal=True
+)
 
-start_conf = df_temporal.iloc[0]['Confirmed']
-end_conf = df_temporal.iloc[-1]['Confirmed']
-growth_rate = ((end_conf - start_conf) / start_conf * 100) if start_conf > 0 else 0
+if modo_totales == "Último dato del rango":
+    total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].iloc[-1]
+    titulo_totales = f"Totales al último día del rango: {label_scope}"
+else:
+    total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum()
+    titulo_totales = f"Totales acumulados en el rango: {label_scope}"
 
+# ---------------------------------------------------------
+# REBROTE (SIEMPRE PRIMER vs ÚLTIMO DÍA)
+# ---------------------------------------------------------
 activos_inicio = df_temporal.iloc[0]['Active']
 activos_fin = df_temporal.iloc[-1]['Active']
 variacion_activos = activos_fin - activos_inicio
@@ -293,11 +341,15 @@ else:
     color_txt = "gray"
     mensaje_rebrote = "La cantidad de activos se mantiene igual."
 
-tasa_letalidad = (total_stats['Deaths'] / total_stats['Confirmed'] * 100) if total_stats['Confirmed'] > 0 else 0
+# Tasa de letalidad usando los totales según el modo elegido
+tasa_letalidad = (
+    total_stats['Deaths'] / total_stats['Confirmed'] * 100
+    if total_stats['Confirmed'] > 0 else 0
+)
 
-st.subheader(f"Totales Acumulados: {label_scope}")
+st.subheader(titulo_totales)
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}", f"{growth_rate:.2f}% Crecimiento")
+k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}")
 k2.metric("Activos Totales", f"{int(total_stats['Active']):,}")
 k3.metric("Fallecidos", f"{int(total_stats['Deaths']):,}")
 k4.metric("Recuperados", f"{int(total_stats['Recovered']):,}")
@@ -320,7 +372,7 @@ with col_let:
 
 with col_reb:
     with st.container(border=True):
-        st.markdown("#### Dinámica de Contagio (Tendencia)")
+        st.markdown("#### Rebrote Primer resultado - Últimos acumulados (Tendencia)")
         st.markdown(f":{color_txt}[**{estado_rebrote}**]")
         st.write(f"Inicio: {int(activos_inicio):,} activos -> Fin: {int(activos_fin):,} activos")
         st.caption(mensaje_rebrote)
@@ -336,7 +388,6 @@ with tab1:
         y=['Confirmed', 'Active', 'Deaths', 'Recovered'],
         title="Tendencia Temporal",
         markers=True, 
-        log_y=True
     )
     st.plotly_chart(fig_line, use_container_width=True)
 
@@ -352,8 +403,8 @@ with tab2:
                 locationmode="country names",
                 color=var_map,
                 hover_name="Country_Region",
-                color_continuous_scale="Reds" if var_map=="Deaths" else "Plasma",
-                title=f"Volumen Total: {var_map}"
+                color_continuous_scale="Reds" if var_map == "Deaths" else "Plasma",
+                title=f"Último dato del rango: {var_map}"
             )
             st.plotly_chart(fig_map, use_container_width=True)
     else:
@@ -367,7 +418,7 @@ with tab3:
         y='Country_Region',
         orientation='h',
         text_auto='.2s',
-        title="Top 10 Países (Volumen de Confirmados)",
+        title="Top 10 Países (Confirmados al último día del rango)",
         color='Confirmed',
         color_continuous_scale='Viridis'
     )
