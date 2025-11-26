@@ -3,7 +3,14 @@ import pandas as pd
 import plotly.express as px
 import ssl
 import numpy as np
+import requests
+from io import StringIO
+import concurrent.futures
+import country_converter as coco  # para continentes
 
+# ---------------------------------------------------------
+# CONFIG SSL (por si hay problemas de certificados HTTPS)
+# ---------------------------------------------------------
 try:
     _create_unverified_https_context = ssl._create_unverified_context
 except AttributeError:
@@ -13,44 +20,217 @@ else:
 
 st.set_page_config(page_title="Monitor COVID-19", layout="wide")
 
+# ---------------------------------------------------------
+# CONFIGURACIÓN DESCARGA DATOS (tipo Parte 3 optimizada)
+# ---------------------------------------------------------
+url_base = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports"
+
+mapeo_columnas = {
+    'Province/State': 'Province_State',
+    'Country/Region': 'Country_Region',
+    'Last Update': 'Last_Update',
+    'Last_Update': 'Last_Update',
+    'Lat': 'Lat',
+    'Long_': 'Long_',
+    'Confirmed': 'Confirmed',
+    'Deaths': 'Deaths',
+    'Recovered': 'Recovered',
+    'Active': 'Active',
+    'Combined_Key': 'Combined_Key',
+    'Incident_Rate': 'Incident_Rate',
+    'Incidence_Rate': 'Incident_Rate',
+    'Case_Fatality_Ratio': 'Case_Fatality_Ratio',
+    'Case-Fatality_Ratio': 'Case_Fatality_Ratio'
+}
+
+columnas_finales = list(set(mapeo_columnas.values()))
+
+# estandarización básica de nombres de países
+country_name_standardization = {
+    "US": "United States",
+    "Korea, North": "North Korea",
+    "Korea, South": "South Korea",
+    "Taiwan*": "Taiwan"
+}
+
+def procesar_reporte_diario(argumentos):
+    """Descarga y limpia un reporte diario individual."""
+    fecha, url = argumentos
+    
+    try:
+        respuesta = requests.get(url, timeout=15)
+        if respuesta.status_code != 200:
+            return None, f"Status {respuesta.status_code}"
+
+        # Intentar leer en utf-8 y si no, en latin-1
+        try:
+            datos_csv = StringIO(respuesta.text)
+            df_dia = pd.read_csv(datos_csv, on_bad_lines='skip')
+        except:
+            try:
+                datos_csv = StringIO(respuesta.content.decode('latin-1'))
+                df_dia = pd.read_csv(datos_csv, on_bad_lines='skip')
+            except Exception as e:
+                return None, f"Error lectura: {e}"
+
+        # 1. Normalizar nombres de columnas
+        df_dia.rename(columns=mapeo_columnas, inplace=True)
+        
+        # 2. Quedarse sólo con columnas necesarias
+        columnas_presentes = [c for c in columnas_finales if c in df_dia.columns]
+        df_dia = df_dia[columnas_presentes]
+
+        # 3. Llenar NaN en confirmados y muertos para poder filtrar
+        for col in ['Confirmed', 'Deaths']:
+            if col in df_dia.columns:
+                df_dia[col] = df_dia[col].fillna(0)
+            else:
+                df_dia[col] = 0  
+
+        # 4. Filtrar filas útiles (donde pasa algo)
+        filas_validas = (df_dia['Confirmed'] > 0) | (df_dia['Deaths'] > 0)
+        df_dia = df_dia[filas_validas]
+
+        # 5. Filtrar filas sin país
+        if 'Country_Region' in df_dia.columns:
+            df_dia = df_dia.dropna(subset=['Country_Region'])
+
+        # 6. Optimización de tipos numéricos
+        for col in ['Confirmed', 'Deaths', 'Recovered', 'Active']:
+            if col in df_dia.columns:
+                df_dia[col] = pd.to_numeric(df_dia[col], downcast='integer')
+        
+        for col in ['Lat', 'Long_', 'Incident_Rate', 'Case_Fatality_Ratio']:
+            if col in df_dia.columns:
+                df_dia[col] = pd.to_numeric(df_dia[col], downcast='float')
+
+        # Guardar fecha del archivo
+        df_dia['fecha_archivo'] = fecha
+        
+        if df_dia.empty:
+            return None, "Vacío tras filtro"
+
+        return df_dia, None 
+
+    except Exception as e:
+        return None, f"Error de conexión: {e}"
+
+def generar_urls_reportes(anio_inicio, anio_fin):
+    """Genera lista de (fecha, url) entre dos años."""
+    urls_a_procesar = []
+    rango_fechas = pd.date_range(start=f'{anio_inicio}-01-01', end=f'{anio_fin}-12-31')
+    
+    for fecha in rango_fechas:
+        formato = fecha.strftime('%m-%d-%Y')
+        url = f"{url_base}/{formato}.csv"
+        urls_a_procesar.append((fecha, url))
+    
+    return urls_a_procesar
+
+def agregar_continente(df):
+    """Agrega la columna Continent usando country_converter, optimizado."""
+    if 'Country_Region' not in df.columns:
+        return df
+    
+    # Estandarizar algunos nombres
+    df['Country_Region'] = df['Country_Region'].replace(country_name_standardization)
+
+    # Lista de países únicos
+    unique_countries = df['Country_Region'].astype(str).unique()
+
+    # Convertimos solo esa lista pequeña
+    continents_list = coco.convert(names=unique_countries, to='continent', not_found=None)
+
+    # Diccionario país -> continente
+    country_to_continent_map = dict(zip(unique_countries, continents_list))
+
+    # Mapear a toda la columna
+    df['Continent'] = df['Country_Region'].astype(str).map(country_to_continent_map)
+    df['Continent'] = df['Continent'].fillna('Other')
+
+    return df
+
+def descargar_datos_covid(anio_inicio=2021, anio_fin=2022):
+    """Descarga todos los reportes diarios y devuelve un único DataFrame limpio."""
+    tareas_descarga = generar_urls_reportes(anio_inicio, anio_fin)
+    dataframes_descargados = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ejecutor:
+        resultados_descarga = ejecutor.map(procesar_reporte_diario, tareas_descarga)
+        
+        for (fecha, url), (df_dia, error) in zip(tareas_descarga, resultados_descarga):
+            if df_dia is not None:
+                dataframes_descargados.append(df_dia)
+
+    if not dataframes_descargados:
+        return pd.DataFrame()
+    
+    datos_covid_anuales = pd.concat(dataframes_descargados, ignore_index=True)
+    
+    # Limpieza final por si quedan NaN
+    columnas_enteras = ['Confirmed', 'Deaths', 'Recovered', 'Active']
+    for col in columnas_enteras:
+        if col in datos_covid_anuales.columns:
+            datos_covid_anuales[col] = datos_covid_anuales[col].fillna(0).astype('int32')
+
+    # Asegurarnos de que exista 'Last_Update'
+    if 'Last_Update' not in datos_covid_anuales.columns:
+        datos_covid_anuales['Last_Update'] = datos_covid_anuales['fecha_archivo']
+
+    # Agregar continente
+    datos_covid_anuales = agregar_continente(datos_covid_anuales)
+
+    return datos_covid_anuales
+
+# ---------------------------------------------------------
+# FUNCIÓN DEL DASHBOARD PARA CARGAR DATOS (sin CSV)
+# ---------------------------------------------------------
 @st.cache_data
 def load_data():
-    try:
-        df = pd.read_csv('covid_final_dashboard.csv', thousands=',')
-        df.columns = df.columns.str.strip()
-        
-        col_fecha = 'Last_Update' if 'Last_Update' in df.columns else 'Date'
-        df['Date'] = pd.to_datetime(df[col_fecha], errors='coerce').dt.normalize()
-        df = df.dropna(subset=['Date'])
-
-        cols = ['Confirmed', 'Deaths', 'Recovered', 'Active']
-        for col in cols:
-            if col not in df.columns:
-                df[col] = 0
-            else:
-                if df[col].dtype == 'object':
-                    df[col] = df[col].astype(str).str.replace(',', '').str.strip()
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        def balance_mass(row):
-            conf = row['Confirmed']
-            death = row['Deaths']
-            act = row['Active']
-            rec = row['Recovered']
-            
-            if act == 0 and conf > 0:
-                calc_act = conf - death - rec
-                return max(0, calc_act)
-            return act
-
-        df['Active'] = df.apply(balance_mass, axis=1)
-        df['Recovered'] = df['Recovered'].clip(lower=0)
-        df['Active'] = df['Active'].clip(lower=0)
-
-        return df
-    except FileNotFoundError:
+    # 1) Descargamos y unimos los datos desde GitHub (como en Parte 3 optimizada)
+    df = descargar_datos_covid(2021, 2022)
+    if df.empty:
         return pd.DataFrame()
 
+    # 2) Lo demás es igual que tu dashboard original
+    df.columns = df.columns.str.strip()
+        
+    col_fecha = 'Last_Update' if 'Last_Update' in df.columns else 'Date'
+    df['Date'] = pd.to_datetime(df[col_fecha], errors='coerce').dt.normalize()
+    df = df.dropna(subset=['Date'])
+
+    cols = ['Confirmed', 'Deaths', 'Recovered', 'Active']
+    for col in cols:
+        if col not in df.columns:
+            df[col] = 0
+        else:
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace(',', '').str.strip()
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # Recalcular Active si viene 0, usando balance de masa
+    def balance_mass(row):
+        conf = row['Confirmed']
+        death = row['Deaths']
+        act = row['Active']
+        rec = row['Recovered']
+        
+        if act == 0 and conf > 0:
+            calc_act = conf - death - rec
+            return max(0, calc_act)
+        return act
+
+    df['Active'] = df.apply(balance_mass, axis=1)
+    df['Active'] = df['Active'].clip(lower=0)
+
+    # Recalcular Recovered a partir de Confirmed - Deaths - Active
+    df['Recovered'] = (df['Confirmed'] - df['Deaths'] - df['Active']).clip(lower=0)
+
+    return df
+
+# ---------------------------------------------------------
+# DASHBOARD
+# ---------------------------------------------------------
 df = load_data()
 
 if df.empty:
@@ -83,16 +263,54 @@ if df_filt.empty:
     st.warning("No hay datos en el rango seleccionado.")
     st.stop()
 
+# --------- CONSTRUCCIÓN CORRECTA DE df_temporal Y df_map_sum ---------
 if sel_pais == "Todos":
-    df_temporal = df_filt.groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
-    df_map_sum = df_filt.groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
+    # Global: primero max por país y fecha (evitar doble conteo por provincias),
+    # luego suma por fecha.
+    df_day_country = (
+        df_filt
+        .groupby(['Date', 'Country_Region'])[['Confirmed', 'Deaths', 'Recovered', 'Active']]
+        .max()
+        .reset_index()
+    )
+
+    df_temporal = (
+        df_day_country
+        .groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
+        .sum()
+        .reset_index()
+    )
+    # Para el mapa: total acumulado máximo por país en el rango
+    df_map_sum = (
+        df_day_country
+        .groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
+        .max()
+        .reset_index()
+    )
+
     label_scope = "Global"
+
 else:
-    df_temporal = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Date').sum().reset_index()
-    df_map_sum = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
+    # Para un país: max por fecha (evitar sumar provincias duplicadas)
+    df_pais = df_filt[df_filt['Country_Region'] == sel_pais]
+
+    df_temporal = (
+        df_pais
+        .groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
+        .max()
+        .reset_index()
+    )
+    df_map_sum = (
+        df_pais
+        .groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
+        .max()
+        .reset_index()
+    )
+
     label_scope = sel_pais
 
-total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum()
+# --------- TOTALES: usar el ÚLTIMO día del rango ---------
+total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].iloc[-1]
 
 start_conf = df_temporal.iloc[0]['Confirmed']
 end_conf = df_temporal.iloc[-1]['Confirmed']
@@ -119,7 +337,7 @@ tasa_letalidad = (total_stats['Deaths'] / total_stats['Confirmed'] * 100) if tot
 
 st.subheader(f"Totales Acumulados: {label_scope}")
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}", f"{growth_rate:.2f}% Crecimiento")
+k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}")#, f"{growth_rate:.2f}% Crecimiento")
 k2.metric("Activos Totales", f"{int(total_stats['Active']):,}")
 k3.metric("Fallecidos", f"{int(total_stats['Deaths']):,}")
 k4.metric("Recuperados", f"{int(total_stats['Recovered']):,}")
