@@ -4,9 +4,10 @@ import plotly.express as px
 import ssl
 import numpy as np
 import requests
+import time
 from io import StringIO
 import concurrent.futures
-import country_converter as coco  # para continentes
+import country_converter as coco  # <- para los continentes
 
 # ---------------------------------------------------------
 # CONFIG SSL (por si hay problemas de certificados HTTPS)
@@ -21,7 +22,7 @@ else:
 st.set_page_config(page_title="Monitor COVID-19", layout="wide")
 
 # ---------------------------------------------------------
-# CONFIGURACIÓN DESCARGA DATOS (tipo Parte 3 optimizada)
+# CONFIGURACIÓN DESCARGA DATOS (tipo PARTE 3 optimizada)
 # ---------------------------------------------------------
 url_base = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports"
 
@@ -104,7 +105,7 @@ def procesar_reporte_diario(argumentos):
             if col in df_dia.columns:
                 df_dia[col] = pd.to_numeric(df_dia[col], downcast='float')
 
-        # Guardar fecha del archivo
+        # Guardar fecha del archivo (por si se necesita)
         df_dia['fecha_archivo'] = fecha
         
         if df_dia.empty:
@@ -132,10 +133,10 @@ def agregar_continente(df):
     if 'Country_Region' not in df.columns:
         return df
     
-    # Estandarizar algunos nombres
+    # Estandarizar algunos nombres raros
     df['Country_Region'] = df['Country_Region'].replace(country_name_standardization)
 
-    # Lista de países únicos
+    # Lista de países únicos (máx ~200)
     unique_countries = df['Country_Region'].astype(str).unique()
 
     # Convertimos solo esa lista pequeña
@@ -208,7 +209,6 @@ def load_data():
                 df[col] = df[col].astype(str).str.replace(',', '').str.strip()
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # Recalcular Active si viene 0, usando balance de masa
     def balance_mass(row):
         conf = row['Confirmed']
         death = row['Deaths']
@@ -221,15 +221,13 @@ def load_data():
         return act
 
     df['Active'] = df.apply(balance_mass, axis=1)
+    df['Recovered'] = df['Recovered'].clip(lower=0)
     df['Active'] = df['Active'].clip(lower=0)
-
-    # Recalcular Recovered a partir de Confirmed - Deaths - Active
-    df['Recovered'] = (df['Confirmed'] - df['Deaths'] - df['Active']).clip(lower=0)
 
     return df
 
 # ---------------------------------------------------------
-# DASHBOARD
+# DASHBOARD (tu código tal cual, ahora con Continent disponible)
 # ---------------------------------------------------------
 df = load_data()
 
@@ -263,54 +261,16 @@ if df_filt.empty:
     st.warning("No hay datos en el rango seleccionado.")
     st.stop()
 
-# --------- CONSTRUCCIÓN CORRECTA DE df_temporal Y df_map_sum ---------
 if sel_pais == "Todos":
-    # Global: primero max por país y fecha (evitar doble conteo por provincias),
-    # luego suma por fecha.
-    df_day_country = (
-        df_filt
-        .groupby(['Date', 'Country_Region'])[['Confirmed', 'Deaths', 'Recovered', 'Active']]
-        .max()
-        .reset_index()
-    )
-
-    df_temporal = (
-        df_day_country
-        .groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
-        .sum()
-        .reset_index()
-    )
-    # Para el mapa: total acumulado máximo por país en el rango
-    df_map_sum = (
-        df_day_country
-        .groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
-        .max()
-        .reset_index()
-    )
-
+    df_temporal = df_filt.groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
+    df_map_sum = df_filt.groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
     label_scope = "Global"
-
 else:
-    # Para un país: max por fecha (evitar sumar provincias duplicadas)
-    df_pais = df_filt[df_filt['Country_Region'] == sel_pais]
-
-    df_temporal = (
-        df_pais
-        .groupby('Date')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
-        .max()
-        .reset_index()
-    )
-    df_map_sum = (
-        df_pais
-        .groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']]
-        .max()
-        .reset_index()
-    )
-
+    df_temporal = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Date').sum().reset_index()
+    df_map_sum = df_filt[df_filt['Country_Region'] == sel_pais].groupby('Country_Region')[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum().reset_index()
     label_scope = sel_pais
 
-# --------- TOTALES: usar el ÚLTIMO día del rango ---------
-total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].iloc[-1]
+total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum()
 
 start_conf = df_temporal.iloc[0]['Confirmed']
 end_conf = df_temporal.iloc[-1]['Confirmed']
@@ -337,7 +297,7 @@ tasa_letalidad = (total_stats['Deaths'] / total_stats['Confirmed'] * 100) if tot
 
 st.subheader(f"Totales Acumulados: {label_scope}")
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}")#, f"{growth_rate:.2f}% Crecimiento")
+k1.metric("Confirmados", f"{int(total_stats['Confirmed']):,}", f"{growth_rate:.2f}% Crecimiento")
 k2.metric("Activos Totales", f"{int(total_stats['Active']):,}")
 k3.metric("Fallecidos", f"{int(total_stats['Deaths']):,}")
 k4.metric("Recuperados", f"{int(total_stats['Recovered']):,}")
