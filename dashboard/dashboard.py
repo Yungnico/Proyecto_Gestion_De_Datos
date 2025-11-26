@@ -4,7 +4,6 @@ import plotly.express as px
 import ssl
 import numpy as np
 import requests
-import time
 from io import StringIO
 import concurrent.futures
 import country_converter as coco  # <- para los continentes
@@ -188,12 +187,10 @@ def descargar_datos_covid(anio_inicio=2021, anio_fin=2022):
 # ---------------------------------------------------------
 @st.cache_data
 def load_data():
-    # 1) Descargamos y unimos los datos desde GitHub (como en Parte 3 optimizada)
     df = descargar_datos_covid(2021, 2022)
     if df.empty:
         return pd.DataFrame()
 
-    # 2) Lo demás es igual que tu dashboard original
     df.columns = df.columns.str.strip()
         
     col_fecha = 'Last_Update' if 'Last_Update' in df.columns else 'Date'
@@ -215,7 +212,6 @@ def load_data():
         act = row['Active']
         rec = row['Recovered']
         
-        # Si Active viene 0 pero sí hay Confirmed, lo recalculamos
         if act == 0 and conf > 0:
             calc_act = conf - death - rec
             return max(0, calc_act)
@@ -252,7 +248,7 @@ with st.container(border=True):
     paises = ["Todos"] + sorted(df_geo['Country_Region'].unique())
     sel_pais = c2.selectbox("Filtro País", paises)
     
-    min_d, max_d = df['Date'].min(), df['Date'].max()
+    min_d, max_d = df_geo['Date'].min(), df_geo['Date'].max()
     fechas = c3.date_input("Rango de Análisis", [min_d, max_d], min_value=min_d, max_value=max_d)
 
 mask = (df_geo['Date'] >= pd.to_datetime(fechas[0])) & (df_geo['Date'] <= pd.to_datetime(fechas[1]))
@@ -264,8 +260,11 @@ if df_filt.empty:
 
 numeric_cols = ['Confirmed', 'Deaths', 'Recovered', 'Active']
 
+# ---------------------------------------------------------
+# APLICAR FILTROS A SERIES / MAPA / RANKING
+# ---------------------------------------------------------
 if sel_pais == "Todos":
-    # Curvas globales: sumar por día (por si hay múltiples filas por país)
+    # Curvas globales: sumar por día
     df_temporal = (
         df_filt
         .groupby('Date')[numeric_cols]
@@ -273,20 +272,27 @@ if sel_pais == "Todos":
         .reset_index()
     )
 
-    # Mapa / ranking: usar el ÚLTIMO dato disponible de cada país en el rango
+    # Datos por país:
+    # - último dato del rango
     df_last = (
         df_filt
         .sort_values('Date')
         .groupby('Country_Region')
         .tail(1)
+    )[['Country_Region'] + numeric_cols]
+
+    # - acumulado en el rango
+    df_acum = (
+        df_filt
+        .groupby('Country_Region')[numeric_cols]
+        .sum()
+        .reset_index()
     )
-    df_map_sum = df_last[['Country_Region'] + numeric_cols]
 
     label_scope = "Global"
 else:
     df_country = df_filt[df_filt['Country_Region'] == sel_pais]
 
-    # Curvas del país: sumar por día (por si tiene provincias)
     df_temporal = (
         df_country
         .groupby('Date')[numeric_cols]
@@ -294,14 +300,19 @@ else:
         .reset_index()
     )
 
-    # Para el mapa / ranking en modo país (no se usa mapa, pero por consistencia)
     df_last = (
         df_country
         .sort_values('Date')
         .groupby('Country_Region')
         .tail(1)
+    )[['Country_Region'] + numeric_cols]
+
+    df_acum = (
+        df_country
+        .groupby('Country_Region')[numeric_cols]
+        .sum()
+        .reset_index()
     )
-    df_map_sum = df_last[['Country_Region'] + numeric_cols]
 
     label_scope = sel_pais
 
@@ -317,9 +328,15 @@ modo_totales = st.radio(
 if modo_totales == "Último dato del rango":
     total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].iloc[-1]
     titulo_totales = f"Totales al último día del rango: {label_scope}"
+    df_map_sum = df_last
+    mapa_suffix = "Último dato del rango"
+    ranking_suffix = "al último día del rango"
 else:
     total_stats = df_temporal[['Confirmed', 'Deaths', 'Recovered', 'Active']].sum()
     titulo_totales = f"Totales acumulados en el rango: {label_scope}"
+    df_map_sum = df_acum
+    mapa_suffix = "Acumulados en el rango"
+    ranking_suffix = "acumulados en el rango"
 
 # ---------------------------------------------------------
 # REBROTE (SIEMPRE PRIMER vs ÚLTIMO DÍA)
@@ -387,7 +404,7 @@ with tab1:
         x='Date', 
         y=['Confirmed', 'Active', 'Deaths', 'Recovered'],
         title="Tendencia Temporal",
-        markers=True, 
+        markers=True
     )
     st.plotly_chart(fig_line, use_container_width=True)
 
@@ -404,11 +421,11 @@ with tab2:
                 color=var_map,
                 hover_name="Country_Region",
                 color_continuous_scale="Reds" if var_map == "Deaths" else "Plasma",
-                title=f"Último dato del rango: {var_map}"
+                title=f"{mapa_suffix}: {var_map}"
             )
             st.plotly_chart(fig_map, use_container_width=True)
     else:
-        st.info("Selecciona Todos en el filtro para ver el mapa global.")
+        st.info("Selecciona 'Todos' en el filtro de país para ver el mapa global.")
 
 with tab3:
     top_n = df_map_sum.nlargest(10, 'Confirmed').sort_values('Confirmed', ascending=True)
@@ -418,7 +435,7 @@ with tab3:
         y='Country_Region',
         orientation='h',
         text_auto='.2s',
-        title="Top 10 Países (Confirmados al último día del rango)",
+        title=f"Top 10 Países (Confirmados {ranking_suffix})",
         color='Confirmed',
         color_continuous_scale='Viridis'
     )
